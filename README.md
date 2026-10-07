@@ -183,3 +183,5 @@ This project is not affiliated with or endorsed by LinkedIn. You are responsible
 ## License
 
 MIT
+![Alt Text](https://github.com/webd2276/LinkedIn-AI-Job-Hunter-v2-find-10-apply-5-daily-/blob/main/json.png)
+
