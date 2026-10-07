@@ -1,187 +1,149 @@
-# LinkedIn AI Job Hunter
+# LinkedIn AI Job Hunter v2
 
-An n8n workflow that reads your CV, finds fresh LinkedIn jobs every day, scores each one against your profile with AI, writes a tailored cover letter, and queues the best matches. A small Playwright bot running on **your own computer** then applies to the queued jobs through LinkedIn Easy Apply.
+An n8n workflow that runs every day, reads your CV, finds new LinkedIn jobs that match it, scores each job with AI, writes a cover letter for each one, and tries to apply to the best matches with LinkedIn Easy Apply through a cloud browser. Every job goes into a Google Sheet, and you get an email for each result.
 
-**Daily target:** find 10 new jobs, apply to the top 5.
+> **Default limits:** it finds up to **10** new jobs a day and applies to up to **5** (only jobs scoring at least 70/100).
 
-> **Read this first.** Automating actions on LinkedIn is against LinkedIn's User Agreement and can get your account restricted or banned. This project is for personal learning and use at your own risk. The bot is deliberately slow and cautious, but it cannot remove that risk. Start with the manual-review mode (see [Modes](#modes)).
+---
+
+## Features
+
+- **CV-based search**: an AI model reads your CV (PDF on Google Drive) and picks your field, seniority, skills, top job titles and search keywords.
+- **Daily LinkedIn job search**: uses an Apify LinkedIn Jobs scraper and only looks at jobs posted in the last 24 hours.
+- **No duplicates**: skips jobs that are already in your Google Sheet (it checks the URL and the company + title pair).
+- **Filters**: leave out companies or title words you don't want (for example `intern`, `unpaid`, `volunteer`).
+- **AI scoring and cover letters**: each job gets a 0–100 match score, a one-line reason and a cover letter of about 120 words based only on what is in your CV.
+- **Automatic Easy Apply**: a Browserbase cloud browser logs in to LinkedIn and submits Easy Apply forms. If it hits a captcha, a verification check, or a required question it can't answer truthfully from your CV, it stops and does not submit.
+- **Dry-run mode**: test the whole flow without applying to anything.
+- **Retry queue**: jobs marked `queued` or `error` are tried again on the next run.
+- **Google Sheets log**: one row per job with its score, status, reason, note and date.
+- **Email alerts**: Gmail sends you an email for each job (applied, review and apply, or apply manually), with the cover letter included.
+- **Error alerts**: an Error Trigger emails you if the workflow fails.
 
 ---
 
 ## How it works
 
 ```
- n8n (cloud or self-hosted)                                  Your computer
-┌──────────────────────────────────────────────────┐        ┌──────────────────────────┐
-│ 09:00 trigger                                    │        │  apply-linkedin.js       │
-│   -> read CV from Google Drive, extract text     │        │  (Playwright, your       │
-│   -> AI analyses CV: field, titles, keywords     │        │   logged-in browser)     │
-│   -> Apify LinkedIn scraper: jobs from last 24h  │        │                          │
-│   -> drop duplicates already in Google Sheet     │        │  1. GET  /job-queue  ────┼──┐
-│   -> keep 10 new jobs                            │        │  2. apply via Easy Apply │  │
-│   -> AI scores each job (0-100) + cover letter   │        │  3. POST /job-result ────┼──┤
-│   -> log all jobs to Google Sheet                │        └──────────────────────────┘  │
-│   -> top 5 above min score get status "queued"   │                                      │
-│   -> email you the top matches                   │  <───────── webhooks (x-bot-key) ────┘
-└──────────────────────────────────────────────────┘
+Daily 9AM Trigger
+  -> Config
+  -> Download CV (Google Drive)
+  -> Extract CV Text (PDF)
+  -> Analyze CV (AI)             -> Parse Profile
+  -> Search LinkedIn Jobs (Apify)
+  -> Read Jobs Log (Google Sheets)
+  -> Pick New Jobs (dedupe + filters + re-queue)
+  -> No New Jobs? --yes--> Email "no new jobs"
+                 --no---> Score + Cover Letter (AI) -> Parse Scores + Rank
+                            |-> Log Found Jobs (Google Sheets)
+                            |-> Filter To Apply (top N >= min_score)
+                                  -> Dry Run? --yes--> Mark Dry Run -> Email
+                                              --no---> Apply via Browser (Browserbase)
+                                                         -> Parse Apply Results
+                                                              |-> Update Status (Sheets)
+                                                              |-> Email
+
+Error Trigger -> Email alert
 ```
 
-The Google Sheet is the single source of truth. Every job ends up with a status: `found`, `below_threshold`, `queued`, `applied`, `manual_needed` or `error`.
+---
 
-## Features
+## Tech stack
 
-- **CV-driven search.** Job titles, keywords and location come from your CV, not hard-coded values.
-- **Strict AI scoring.** Each job gets a 0-100 match score and a one-line reason. Only jobs at or above `min_score` are queued.
-- **Honest cover letters.** The prompt tells the model to claim only skills that actually appear in your CV.
-- **Duplicate protection.** Jobs are matched by URL and by company + title, so you never see or apply to the same job twice.
-- **Safe skipping.** If an application asks a question the bot does not know the answer to, it discards the form and marks the job `manual_needed` instead of guessing.
-- **Production touches.** Retries on every network node, an error workflow that emails you on failure, a config node for all settings, and a "no new jobs" notice.
-- **Free AI option.** Uses [Pollinations](https://enter.pollinations.ai/) by default, no paid LLM account needed.
-
-## Stack
-
-| Part | Used for |
+| Purpose | Service |
 |---|---|
-| [n8n](https://n8n.io) | Orchestration (works on n8n Cloud) |
-| [Pollinations](https://enter.pollinations.ai/) | CV analysis, job scoring, cover letters |
-| [Apify](https://apify.com) LinkedIn jobs scraper | Fetching fresh jobs |
-| Google Drive + Google Sheets | CV storage and job log / queue |
-| Gmail | Notifications and error alerts |
-| [Playwright](https://playwright.dev) (Node.js) | Local Easy Apply bot |
+| Automation | [n8n](https://n8n.io) |
+| CV storage | Google Drive |
+| AI (CV analysis, scoring, cover letters) | [Pollinations](https://pollinations.ai) API (OpenAI-compatible) |
+| Job search | [Apify](https://apify.com) `curious_coder/linkedin-jobs-scraper` |
+| Job log | Google Sheets |
+| Auto-apply | [Browserbase](https://browserbase.com) n8n node |
+| Notifications | Gmail |
 
-## Repository layout
-
-```
-.
-├── workflow/
-│   └── linkedin-job-hunter.n8n.json   # import this into n8n
-├── bot/
-│   ├── apply-linkedin.js              # local Playwright bot
-│   └── .env.example                   # copy to .env and fill in
-├── .gitignore
-└── README.md
-```
+---
 
 ## Setup
 
-### 1. Google Sheet
+### 1. Import the workflow
+In n8n, go to **Workflows > Import from file** and pick `workflow.json`.
 
-Create a sheet with a tab named `Jobs` and this header row:
-
-```
-job_url | title | company | score | status | reason | note | date | cover_letter
-```
-
-Upload your CV (PDF) to Google Drive and note its file ID.
-
-### 2. n8n credentials
-
-| Credential | Settings |
-|---|---|
-| Google Drive, Google Sheets, Gmail | Standard OAuth2 connection in n8n |
-| **Pollinations** (Header Auth) | Name: `Authorization`  Value: `Bearer YOUR_POLLINATIONS_KEY` |
-| **Apify** (Query Auth) | Name: `token`  Value: your Apify API token |
-| **Bot Key** (Header Auth) | Name: `x-bot-key`  Value: a long random secret (`openssl rand -hex 24`) |
-
-> The Header Auth **Name** is the HTTP header name, so it must be exactly `Authorization` (no spaces). Putting `Bearer ...` or "bearer token" there causes `Header name must be a valid HTTP token`.
-
-### 3. Import and configure the workflow
-
-1. In n8n choose **Import from file** and select `workflow/linkedin-job-hunter.n8n.json`.
-2. Open the **Config** node and set: CV file ID, Sheet ID, `notify_email`, `find_limit` (10), `apply_limit` (5), `min_score` (70).
-3. In **Search LinkedIn Jobs** replace `YOUR_LINKEDIN_JOBS_ACTOR_ID` with your Apify actor (`username~actor-name`). If your actor uses different input or output field names, adjust the request body and the **Pick New Jobs** node.
-4. Select your credentials on every node that shows a warning (Google, Gmail, Pollinations, Apify, and Bot Key on both webhook nodes).
-5. Replace `YOUR_SHEET_ID` and `YOUR_EMAIL@gmail.com` where they still appear.
-6. In the workflow settings set **Error workflow** to this same workflow so the failure email works.
-7. Run it once manually, check the Sheet, then switch the workflow to **Active**.
-8. Open **Get Queue Webhook** and **Result Webhook** and copy their **Production URL** (it only works while the workflow is active).
-
-### 4. Local bot
-
-Requires Node.js 18 or newer.
-
-```bash
-cd bot
-npm i playwright
-npx playwright install chromium
-cp .env.example .env      # then edit the values
-node apply-linkedin.js --login   # log in to LinkedIn by hand, then close the window
-node apply-linkedin.js --queue   # fetch queued jobs and apply
-```
-
-`.env`:
-
-```
-QUEUE_URL=https://YOUR-N8N/webhook/job-queue
-RESULT_URL=https://YOUR-N8N/webhook/job-result
-BOT_KEY=same-secret-as-in-the-n8n-Bot-Key-credential
-PHONE=+92XXXXXXXXXX
-CV_PATH=/absolute/path/to/cv.pdf
-MAX_APPLY=2
-```
-
-Start with `MAX_APPLY=2` or `3` and watch the browser. Raise it to 5 once it behaves.
-
-On Linux distributions Playwright does not officially support, the install prints a "BEWARE" notice and uses a fallback build. If Chromium reports missing libraries, install them with your package manager.
-
-### 5. Run it daily
-
-```cron
-30 9 * * * cd /path/to/bot && /usr/bin/node apply-linkedin.js --queue >> bot.log 2>&1
-```
-
-Your computer must be on and logged in to a desktop session, because the browser opens visibly. On Windows use Task Scheduler.
-
-## Modes
-
-| Mode | What happens | When to use |
+### 2. Add credentials
+| Credential | Used by | Notes |
 |---|---|---|
-| **Manual review** | Do not run the bot. The workflow emails you the top jobs with the link and cover letter, and you apply yourself. | Recommended starting point, zero account risk |
-| **Bot apply** | Run `apply-linkedin.js --queue`. The bot applies and reports back to the Sheet. | After you trust the scoring and have tested the bot |
+| Google Drive OAuth2 | Download CV | |
+| Google Sheets OAuth2 | Read Jobs Log, Log Found Jobs, Update Status | |
+| Gmail OAuth2 | All email nodes | |
+| Header Auth | Both Pollinations nodes | Name: `Authorization`, Value: `Bearer <your_pollinations_key>` |
+| Query Auth | Search LinkedIn Jobs | Name: `token`, Value: `<your_apify_token>` |
+| Browserbase API | Apply via Browser | |
 
-## Safety measures built into the bot
+### 3. Create the Google Sheet
+Make a sheet with a tab named `jobs` and this header row:
 
-- Maximum applications per run (`MAX_APPLY`), default 5.
-- Random 45-120 second pause between applications.
-- Persistent real browser profile, you log in yourself. No password is ever stored by the script.
-- Unknown required question: the application is discarded and the job is marked `manual_needed`.
-- Webhooks require the `x-bot-key` header.
+```
+job_url | title | company | score | status | reason | note | date
+```
 
-Still recommended: ramp up gradually, never run it on a brand-new account, and stop if LinkedIn shows a warning or captcha.
+### 4. Edit the `Config` node
 
-## Troubleshooting
+| Field | Description | Default |
+|---|---|---|
+| `cv_file_id` | Google Drive file ID of your CV (PDF) | — |
+| `sheet_id` | Google Sheet ID | — |
+| `find_limit` | Most new jobs to find per run | `10` |
+| `apply_limit` | Most applications per run | `5` |
+| `min_score` | Lowest AI match score needed to apply | `70` |
+| `dry_run` | `true` = don't apply, just email the matches | `false` |
+| `phone` | Phone number used in Easy Apply forms | — |
+| `exclude_companies` | Comma-separated companies to skip | empty |
+| `exclude_title_words` | Comma-separated title words to skip | `intern,unpaid,volunteer` |
 
-| Problem | Fix |
+> Also put your Sheet ID in the **Read Jobs Log**, **Log Found Jobs** and **Update Status** nodes, your CV file ID in **Download CV**, and your email address in the Gmail nodes.
+
+### 5. Add your LinkedIn login
+In **Apply via Browser (Browserbase)**, set the `li_email` and `li_password` variables. **Never commit real values** (see the Security section).
+
+### 6. Turn on error alerts
+Go to **Workflow Settings > Error workflow** and select this same workflow.
+
+### 7. Test, then publish
+1. Set `dry_run = true` and run the workflow by hand.
+2. Check the Google Sheet and the emails.
+3. Set `dry_run = false` and publish the workflow.
+
+---
+
+## Job statuses
+
+| Status | Meaning |
 |---|---|
-| `Header name must be a valid HTTP token` | Header Auth **Name** must be `Authorization`, value must start with `Bearer ` |
-| `Authorization failed - check your credentials` (Pollinations) | Value needs the `Bearer ` prefix, use an `sk_` secret key, no stray spaces |
-| Apify `402 ... Request not authenticated` | Attach the Apify Query Auth credential (`token`) to the search node |
-| Apify `datePosted must be equal to one of the allowed values` | Use the exact value your actor accepts (for example `r86400` or `past24Hours`) |
-| `ENOENT ... /opt/job-bot` | Old self-hosted file-write nodes were used on n8n Cloud. Use the current workflow |
-| "No new jobs" but jobs exist | Field names in **Pick New Jobs** do not match your Apify actor's output |
-| Bot gets `403` from n8n | `BOT_KEY` does not match the Bot Key credential, or you used the Test URL instead of the Production URL |
-| Bot says `Jobs to process: 0` | Nothing has status `queued` in the Sheet yet. Run the workflow first |
-| Easy Apply button not found | The job applies on the company site. It is marked `manual_needed` |
+| `found` | Logged but not chosen for applying |
+| `below_threshold` | Score was below `min_score` |
+| `queued` | Chosen for applying (tried again next run if not finished) |
+| `dry_run` | Dry-run mode, sent to you to review |
+| `applied` | Easy Apply application submitted |
+| `manual_needed` | Skipped (no Easy Apply, captcha, verification, or a question it couldn't answer); apply by hand |
+| `error` | Browser or automation error; tried again next run |
 
-## Security notes
+---
 
-- Never commit `.env`, API keys, or the `li-profile/` folder. The profile folder contains your logged-in LinkedIn session.
-- If a key is ever pasted into a chat, issue, or commit, revoke it and create a new one.
-- Keep the Bot Key secret. Anyone with it can read your queued jobs and cover letters.
+## Security
 
-## Limitations
+- **Never commit secrets.** Before you export the workflow to GitHub, remove the LinkedIn password, API keys, phone number and personal IDs. n8n credentials are not included in exports, but values typed straight into node fields (like Browserbase variables) **are**.
+- The AI prompts treat CV and job text as untrusted data, which helps protect against prompt injection.
+- The bot never makes up experience, degrees or visa status. If a required question can't be answered truthfully, it skips the job.
 
-- Only LinkedIn **Easy Apply** jobs can be applied to automatically.
-- LinkedIn changes its page markup often, so selectors in the bot may need updates.
-- The Pollinations free tier can be slower and less consistent than paid models. Always skim the cover letters.
-- The workflow has not been tested against LinkedIn's live site in every region and account type.
+---
 
 ## Disclaimer
 
-This project is not affiliated with or endorsed by LinkedIn. You are responsible for complying with LinkedIn's terms and with the laws that apply to you. The authors accept no liability for restricted accounts or missed opportunities.
+Automating LinkedIn may break LinkedIn's [User Agreement](https://www.linkedin.com/legal/user-agreement) and can get your account restricted. Use this project at your own risk, keep the daily limits low, and check the applications it sends. This project is for learning purposes.
+
+---
 
 ## License
 
 MIT
+
 ![Alt Text](https://github.com/webd2276/LinkedIn-AI-Job-Hunter-v2-find-10-apply-5-daily-/blob/main/json.png)
 
